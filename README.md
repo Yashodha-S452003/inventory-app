@@ -99,8 +99,8 @@ Confirm/release use transactions with `updateMany` guards on `status = PENDING` 
 
 Two mechanisms work together:
 
-1. **Vercel Cron** (`vercel.json`) calls `GET /api/cron/expire-reservations` every minute. Set `CRON_SECRET` in Vercel; the route checks `Authorization: Bearer <CRON_SECRET>`.
-2. **Lazy cleanup** — `expireStaleReservations()` runs on product listing, reservation reads, and reserve/confirm/release so stock heals even if a cron tick is missed.
+1. **Vercel Cron** (`vercel.json`) calls `GET /api/cron/expire-reservations` once per day at midnight UTC (`0 0 * * *`) — required on the **Hobby** plan (no per-minute cron). Set `CRON_SECRET` in Vercel; the route checks `Authorization: Bearer <CRON_SECRET>`.
+2. **Lazy cleanup** — `expireStaleReservations()` runs when the home page loads (throttled ~30s), so expired holds are usually released well before the daily cron runs.
 
 Expired pending reservations transition to `RELEASED` and decrement `reservedStock` (not `totalStock`).
 
@@ -128,7 +128,7 @@ Build command: `npm run build` (runs `prisma generate`).
 | Choice | Rationale |
 |--------|-----------|
 | Atomic SQL vs Redis lock | Simpler ops; Postgres is the source of truth for inventory |
-| Lazy + cron expiry | Eventual consistency within ~1 min; good enough for take-home |
+| Lazy + daily cron expiry | Stock frees on page loads; cron is a backup (Hobby-safe schedule) |
 | Idempotency in Postgres | No Redis required; fine for moderate traffic |
 | No auth | Out of scope; APIs are public for demo |
 
