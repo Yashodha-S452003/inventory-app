@@ -1,54 +1,89 @@
 # Allo Inventory Reservations (Take-Home)
 
-Next.js App Router demo of **temporary stock reservations** across multiple warehouses. When a shopper proceeds to checkout, units are held for **10 minutes**; payment confirmation permanently decrements stock, while cancel/expiry returns units to the available pool.
+Multi-warehouse inventory with **temporary checkout reservations**. When a shopper reserves stock, units are held for **10 minutes**. Confirming decrements `totalStock`; cancel or expiry returns units to the available pool (`totalStock - reservedStock`).
 
 ## Live demo
 
-Deploy to Vercel + hosted Postgres (Neon/Supabase) and add the live URL here after deployment.
+<!-- Replace with your deployed URL -->
+**https://your-app.vercel.app**
 
-## Stack
+---
 
-- **Next.js 16** (App Router) + TypeScript
-- **Prisma 7** + hosted **PostgreSQL**
-- **Zod** for API validation
-- **Tailwind CSS** for UI
+## How to run the app locally
 
-## Local setup
+### Prerequisites
 
-### 1. Prerequisites
+- **Node.js 20+**
+- **Hosted PostgreSQL** (Neon, Supabase, or Railway). The take-home expects a real remote database, not SQLite.
+  - You may use the same `DATABASE_URL` for local dev and production while building the demo.
 
-- Node.js 20+
-- A hosted Postgres database (Neon, Supabase, or Railway free tier)
+### Environment variables
 
-### 2. Environment
-
-Copy `.env.example` to `.env`:
+Copy the example file and edit `.env` in the project root:
 
 ```bash
 cp .env.example .env
 ```
 
-Set:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string. Example: `postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require` |
+| `CRON_SECRET` | Yes (production cron) | Random secret string. Locally optional unless testing `/api/cron/expire-reservations`. On Vercel, Cron sends `Authorization: Bearer <CRON_SECRET>`. |
 
-| Variable | Purpose |
-|----------|---------|
-| `DATABASE_URL` | Postgres connection string (`?sslmode=require` for Neon) |
-| `CRON_SECRET` | Random string; secures `/api/cron/expire-reservations` |
+**Important**
 
-### 3. Install & migrate
+- Use a **hosted** URL in `.env` if you want local and Vercel to share one database.
+- Do **not** use `127.0.0.1` / `localhost` in Vercel — that only works on your machine.
+- Keep `.env` out of git (already in `.gitignore`).
+
+### Install dependencies
 
 ```bash
 npm install
+```
+
+### Run migrations
+
+Creates tables from `prisma/migrations`:
+
+```bash
 npm run db:migrate
+```
+
+If migrate fails on a fresh DB, you can use:
+
+```bash
+npx prisma db push
+```
+
+### Seed sample data
+
+Loads 2 warehouses, 3 products, and inventory (including low-stock SKUs for concurrency demos):
+
+```bash
 npm run db:seed
+```
+
+### Start the dev server
+
+```bash
 npm run dev
 ```
 
-If the home page shows **“No products in database”**, run `npm run db:seed` again. If it shows a **database error**, check that Neon is awake (free tier pauses) and `DATABASE_URL` in `.env` is correct, then restart `npm run dev`.
+Open **[http://localhost:3000](http://localhost:3000)**.
 
-Open [http://localhost:3000](http://localhost:3000).
+You should see three products with per-warehouse stock and **Reserve** buttons. Click **Reserve** → checkout page with countdown → **Confirm purchase** or **Cancel**.
 
-### 4. Concurrency smoke test
+### Troubleshooting local
+
+| Symptom | Fix |
+|---------|-----|
+| “No products in database” | Run `npm run db:seed` |
+| “Can’t reach database server” | Check `DATABASE_URL`, wake Neon if paused, restart `npm run dev` |
+| Changed `.env` but still errors | Stop dev server (Ctrl+C) and run `npm run dev` again |
+| Reservation page “not found” after switching DB | Old reservation IDs are invalid; reserve again from home |
+
+### Optional: concurrency smoke test
 
 With `npm run dev` running:
 
@@ -56,20 +91,97 @@ With `npm run dev` running:
 npm run test:concurrency
 ```
 
-This fires 8 parallel `POST /api/reservations` requests for **ALLO-HOOD-003 @ LAX-01** (seeded with **1** available unit). Expect **exactly one `201`** and **seven `409`** responses.
+Fires 8 parallel reserves for **ALLO-HOOD-003 @ LAX-01** (1 unit in seed). Expect **one `201`** and **seven `409`**.
 
-## API
+---
+
+## How the expiry mechanism works in production
+
+Reservations expire **10 minutes** after creation (`expiresAt`). When they expire (or are cancelled), status becomes `RELEASED` and `reservedStock` is decremented — `totalStock` is unchanged until a purchase is **confirmed**.
+
+Two mechanisms run in production:
+
+### 1. Lazy cleanup (primary)
+
+`expireStaleReservations()` runs when the **home page** is rendered (server-side), throttled to at most once every **30 seconds** per server instance.
+
+It:
+
+1. Finds `PENDING` reservations with `expiresAt < now`
+2. Marks them `RELEASED` in a single transaction
+3. Decrements `reservedStock` on the related inventory rows (batched per warehouse)
+
+This is what shoppers usually experience: expired holds free up stock when anyone loads the catalog, without waiting for cron.
+
+Individual reservation reads also release **that** reservation if it is past `expiresAt` when you open the checkout page.
+
+### 2. Vercel Cron (backup)
+
+`vercel.json` schedules:
+
+```json
+{
+  "path": "/api/cron/expire-reservations",
+  "schedule": "0 0 * * *"
+}
+```
+
+- Runs **once per day at 00:00 UTC** (Vercel **Hobby** plan does not allow per-minute cron).
+- `GET /api/cron/expire-reservations` calls the same expiry logic with `force=true` (no throttle).
+- Protected by `CRON_SECRET`: requests must send `Authorization: Bearer <CRON_SECRET>`.
+
+Cron is a safety net for expired reservations if the site has no traffic overnight. Under normal demo traffic, lazy cleanup handles expiry within seconds of page load.
+
+### Confirm vs expiry
+
+`POST /api/reservations/:id/confirm` on an expired reservation returns **410 Gone**, releases the hold, and does not decrement `totalStock`.
+
+---
+
+## Trade-offs and what I’d do with more time
+
+### Decisions made
+
+| Area | Choice | Why |
+|------|--------|-----|
+| **Concurrency** | Single atomic `UPDATE` on `Inventory` | Postgres guarantees no oversell without Redis; one round trip |
+| **Expiry** | Lazy cleanup + daily cron | Hobby cron limit; lazy path is good enough for demos and low traffic |
+| **Data layer** | Prisma 7 + `@prisma/adapter-pg` | Hosted Postgres as required; driver adapter matches Prisma 7 |
+| **Idempotency** | `IdempotencyRecord` table in Postgres | Bonus requirement without Redis; store response body + status per `(key, path)` |
+| **UI** | Server-rendered product list + client actions | Faster first paint; fewer client fetches after deploy |
+| **Auth** | None | Out of scope for take-home |
+
+### Limitations (honest)
+
+- **Expiry is eventually consistent** — up to ~30s on lazy throttle, or until the next home page hit / daily cron. Not a real-time timer per reservation in the background.
+- **No queue/worker** — no dedicated job runner; would use BullMQ / Inngest / etc. at scale.
+- **Idempotency records never expire** — production would add TTL cleanup.
+- **Public APIs** — no rate limiting or tenant isolation.
+- **Single-region Postgres** — no multi-region inventory splits.
+
+### With more time
+
+1. **Per-minute expiry worker** (Pro cron, or external scheduler hitting the expire endpoint every minute).
+2. **Integration tests** for concurrent reserve and confirm/release idempotency in CI.
+3. **Metrics & alerting** on 409 rate, expiry backlog, and reservation confirm latency.
+4. **Redis** for idempotency TTL and optional distributed locks on hot SKUs.
+5. **Admin UI** to adjust `totalStock` and inspect active holds.
+6. **Structured logging** (request id, reservation id) for support/debugging.
+
+---
+
+## API reference
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/products` | Products with per-warehouse stock breakdown |
-| `GET` | `/api/warehouses` | Warehouse list |
-| `POST` | `/api/reservations` | Reserve units (`409` if insufficient stock) |
+| `GET` | `/api/products` | Products with per-warehouse stock |
+| `GET` | `/api/warehouses` | Warehouses |
+| `POST` | `/api/reservations` | Reserve units → **409** if insufficient stock |
 | `GET` | `/api/reservations/:id` | Reservation details |
-| `POST` | `/api/reservations/:id/confirm` | Confirm purchase (`410` if expired) |
+| `POST` | `/api/reservations/:id/confirm` | Confirm → **410** if expired |
 | `POST` | `/api/reservations/:id/release` | Cancel / release early |
 
-### Reserve body
+**Reserve body**
 
 ```json
 {
@@ -79,9 +191,11 @@ This fires 8 parallel `POST /api/reservations` requests for **ALLO-HOOD-003 @ LA
 }
 ```
 
-## Concurrency design
+**Idempotency (bonus):** send `Idempotency-Key` on `POST /api/reservations` and `POST /api/reservations/:id/confirm`. Retries return the stored response without repeating side effects.
 
-Reservations use a **single atomic SQL `UPDATE`** so two concurrent requests cannot oversell:
+---
+
+## Concurrency design
 
 ```sql
 UPDATE "Inventory"
@@ -91,56 +205,36 @@ WHERE "id" = $inventoryId
 RETURNING "id";
 ```
 
-If zero rows are updated, the API returns **409**. This avoids application-level read-modify-write races without requiring Redis.
+If no row is updated → **409 Conflict**. Confirm/release use transactions with `updateMany` guarded on `status = PENDING` to prevent double application.
 
-Confirm/release use transactions with `updateMany` guards on `status = PENDING` so double-confirm or double-release is safe.
+---
 
-## Reservation expiry (production)
+## Deploying to Vercel
 
-Two mechanisms work together:
-
-1. **Vercel Cron** (`vercel.json`) calls `GET /api/cron/expire-reservations` once per day at midnight UTC (`0 0 * * *`) — required on the **Hobby** plan (no per-minute cron). Set `CRON_SECRET` in Vercel; the route checks `Authorization: Bearer <CRON_SECRET>`.
-2. **Lazy cleanup** — `expireStaleReservations()` runs when the home page loads (throttled ~30s), so expired holds are usually released well before the daily cron runs.
-
-Expired pending reservations transition to `RELEASED` and decrement `reservedStock` (not `totalStock`).
-
-## Idempotency (bonus)
-
-`POST /api/reservations` and `POST /api/reservations/:id/confirm` accept an **`Idempotency-Key`** header. The server stores the status code + JSON body in `IdempotencyRecord` keyed by `(key, path)`. Retries return the stored response without re-running side effects. Concurrent duplicate keys race on insert; the loser reads the winner’s row.
-
-## Deployment (Vercel + Neon)
-
-1. Create a Neon project and copy the pooled connection string into Vercel env as `DATABASE_URL`.
-2. Set `CRON_SECRET` in Vercel (Vercel Cron sends it automatically when configured).
-3. Deploy; run migrations against production:
+1. Push to GitHub and import the repo in Vercel.
+2. Set environment variables: `DATABASE_URL` (hosted Postgres), `CRON_SECRET`.
+3. Deploy (`npm run build` runs `prisma generate` automatically).
+4. Against production `DATABASE_URL`:
 
    ```bash
-   DATABASE_URL="..." npm run db:migrate
-   DATABASE_URL="..." npm run db:seed
+   npm run db:migrate
+   npm run db:seed
    ```
 
-4. Add the production URL to this README.
+5. Update the **Live demo** URL at the top of this README.
 
-Build command: `npm run build` (runs `prisma generate`).
+`vercel.json` uses a **daily** cron schedule for the Hobby plan.
 
-## Trade-offs & next steps
-
-| Choice | Rationale |
-|--------|-----------|
-| Atomic SQL vs Redis lock | Simpler ops; Postgres is the source of truth for inventory |
-| Lazy + daily cron expiry | Stock frees on page loads; cron is a backup (Hobby-safe schedule) |
-| Idempotency in Postgres | No Redis required; fine for moderate traffic |
-| No auth | Out of scope; APIs are public for demo |
-
-With more time: row-level metrics, integration tests in CI, `SELECT FOR UPDATE` variant for confirm path, Redis for idempotency TTL, admin UI for stock adjustments, and structured logging/tracing.
+---
 
 ## Project structure
 
 ```
 app/
-  api/          # Route handlers
-  reservations/ # Checkout UI
-components/     # Client UI
-lib/            # Domain logic (reserve, confirm, expire, idempotency)
-prisma/         # Schema, migrations, seed
+  api/              # REST route handlers + cron
+  reservations/     # Checkout UI
+components/         # Product list, reserve button, checkout
+lib/                # Reservations, expiry, idempotency, Prisma
+prisma/             # Schema, migrations, seed
+scripts/            # Concurrency smoke test
 ```
