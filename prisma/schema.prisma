@@ -1,15 +1,9 @@
-datasource db {
-  provider = "postgresql"
-}
-
 generator client {
   provider = "prisma-client-js"
 }
 
-enum ReservationStatus {
-  PENDING
-  CONFIRMED
-  RELEASED
+datasource db {
+  provider = "postgresql"
 }
 
 model Product {
@@ -17,8 +11,8 @@ model Product {
   sku         String      @unique
   name        String
   description String?
-  inventories Inventory[]
   createdAt   DateTime    @default(now())
+  inventories Inventory[]
 }
 
 model Warehouse {
@@ -48,9 +42,9 @@ model Reservation {
   status      ReservationStatus @default(PENDING)
   expiresAt   DateTime
   inventoryId Int
-  inventory   Inventory         @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
+  inventory   Inventory         @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
 
   @@index([status, expiresAt])
 }
@@ -64,4 +58,10 @@ model IdempotencyRecord {
   createdAt  DateTime @default(now())
 
   @@unique([id, path])
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  RELEASED
 }

@@ -24,6 +24,11 @@ export function formatErrorForUser(error: unknown): string {
     if (error.message.includes("DATABASE_URL")) {
       return "DATABASE_URL is missing. Add it to .env and restart npm run dev.";
     }
+    if (error.message.includes("127.0.0.1") || error.message.includes("localhost")) {
+      return process.env.VERCEL
+        ? "DATABASE_URL on Vercel points to localhost. Use a hosted Postgres URL (Neon, Supabase, Railway) in Vercel → Settings → Environment Variables, then redeploy."
+        : "DATABASE_URL points to localhost. Start local Postgres, or use a hosted database URL in .env.";
+    }
     if (
       error.message.includes("Can't reach database") ||
       error.message.includes("ECONNREFUSED") ||
