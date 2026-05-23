@@ -3,11 +3,7 @@
 Multi-warehouse inventory with **temporary checkout reservations**. When a shopper reserves stock, units are held for **10 minutes**. Confirming decrements `totalStock`; cancel or expiry returns units to the available pool (`totalStock - reservedStock`).
 
 ## Live demo
-
-<!-- Replace with your deployed URL -->
-**https://your-app.vercel.app**
-
----
+https://inventory-app-zvm8-yashodha-s-projects.vercel.app
 
 ## How to run the app locally
 
@@ -19,10 +15,12 @@ Multi-warehouse inventory with **temporary checkout reservations**. When a shopp
 
 ### Environment variables
 
-Copy the example file and edit `.env` in the project root:
+# Hosted Postgres (Neon, Supabase, Railway, etc.)
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
 
-```bash
-cp .env.example .env
+# Protect the expiry cron route in production (Vercel sends Authorization: Bearer <CRON_SECRET>)
+CRON_SECRET="replace-with-a-long-random-string"
+
 ```
 
 | Variable | Required | Description |
@@ -221,11 +219,7 @@ If no row is updated → **409 Conflict**. Confirm/release use transactions with
    npm run db:seed
    ```
 
-5. Update the **Live demo** URL at the top of this README.
 
-`vercel.json` uses a **daily** cron schedule for the Hobby plan.
-
----
 
 ## Project structure
 
